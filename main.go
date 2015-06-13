@@ -1,20 +1,21 @@
 package main
 
 import (
+	"flag"
 	"log"
+	"math/rand"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"time"
 
 	"github.com/nightexcessive/agario"
 	"github.com/veandco/go-sdl2/sdl"
+	"github.com/veandco/go-sdl2/sdl_ttf"
 )
 
 const (
-	name = "DerpBot"
-
-	regionName = "US-Atlanta"
-	gamemode   = "ffa"
+	gamemode = "ffa"
 )
 
 const (
@@ -22,13 +23,24 @@ const (
 	frameTime       = time.Second / framesPerSecond
 )
 
-func handleSDLEvents(c chan sdl.Event) {
+func handleSDLEvents(c chan sdl.Event, quitChan chan struct{}) {
 	/*sdl.AddEventWatchFunc(func(ev sdl.Event) bool {
 		c <- ev
 		return true
 	})*/
 	for {
-		c <- sdl.WaitEvent()
+		select {
+		case _, ok := <-quitChan:
+			if !ok {
+				return
+			}
+		default:
+		}
+		ev := sdl.WaitEventTimeout(250)
+		if ev == nil {
+			continue
+		}
+		c <- ev
 	}
 }
 
@@ -46,8 +58,9 @@ func handleGameEvents(c chan chan struct{}, g *game) {
 func run(ig *agario.Game) {
 	g := createGame(ig)
 
-	sdlEvents := make(chan sdl.Event)
+	sdlEvents := make(chan sdl.Event, 16)
 	gameEvents := make(chan chan struct{})
+	quitChan := make(chan struct{})
 
 	go handleGameEvents(gameEvents, g)
 
@@ -58,7 +71,9 @@ func run(ig *agario.Game) {
 			case event := <-sdlEvents:
 				switch event.(type) {
 				case *sdl.QuitEvent:
-					os.Exit(0)
+					log.Printf("SDL requested exit. Stopping input loop...")
+					close(quitChan)
+					return
 				case *sdl.MouseMotionEvent:
 				default:
 					log.Printf("SDL event: %T", event)
@@ -75,11 +90,68 @@ func run(ig *agario.Game) {
 		}
 	}()
 
-	handleSDLEvents(sdlEvents)
+	handleSDLEvents(sdlEvents, quitChan)
+	log.Printf("Input loop stopped gracefully")
 }
+
+//var randomNames = []string{"poland", "usa", "china", "russia", "canada", "australia", "spain", "brazil", "germany", "ukraine", "france", "sweden", "hitler", "north korea", "south korea", "japan", "united kingdom", "earth", "greece", "latvia", "lithuania", "estonia", "finland", "norway", "cia", "maldivas", "austria", "nigeria", "reddit", "yaranaika", "confederate", "9gag", "indiana", "4chan", "italy", "bulgaria", "tumblr", "2ch.hk", "hong kong", "portugal", "jamaica", "german empire", "mexico", "sanik", "switzerland", "croatia", "chile", "indonesia", "bangladesh", "thailand", "iran", "iraq", "peru", "moon", "botswana", "bosnia", "netherlands", "european union", "taiwan", "pakistan", "hungary", "satanist", "qing dynasty", "matriarchy", "patriarchy", "feminism", "ireland", "texas", "facepunch", "prodota", "cambodia", "steam", "piccolo", "ea", "india", "kc", "denmark", "quebec", "ayy lmao", "sealand", "bait", "tsarist russia", "origin", "vinesauce", "stalin", "belgium", "luxembourg", "stussy", "prussia", "8ch", "argentina", "scotland", "sir", "romania", "belarus", "wojak", "doge", "nasa", "byzantium", "imperial japan", "french kingdom", "somalia", "turkey", "mars", "pokerface", "8", "irs", "receita federal", "nazi", "ussr"}
+
+var randomNames = []string{"Derp", "DerpBot"}
+
+func randomName() string {
+	return randomNames[rand.Intn(len(randomNames))]
+}
+
+var (
+	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+	memprofile = flag.String("memprofile", "", "write memory profile to this file")
+)
 
 func main() {
 	log.SetFlags(log.Lmicroseconds | log.Lshortfile)
+
+	rand.Seed(time.Now().UnixNano())
+
+	flag.Parse()
+
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
+	defer func() {
+		if *memprofile != "" {
+			f, err := os.Create(*memprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.WriteHeapProfile(f)
+			f.Close()
+		}
+	}()
+
+	log.Printf("Getting current location...")
+	desiredLocation := make(chan string, 1)
+	go func() {
+		curLocation, recommendedServer, err := agario.GetCurrentLocation()
+		if err != nil {
+			panic(err)
+		}
+
+		desiredLocation <- recommendedServer
+
+		if len(recommendedServer) == 0 {
+			log.Printf("WARNING: could not find desired region for %s", curLocation)
+			return
+		}
+
+		log.Printf("Got location: %s", curLocation)
+		log.Printf("Recommended server: %s", recommendedServer)
+	}()
 
 	log.Printf("Getting region info...")
 	info, err := agario.GetInfo()
@@ -89,8 +161,9 @@ func main() {
 
 	var c *agario.Connection
 
+	regionName := <-desiredLocation
 	for _, region := range info.Regions {
-		if region.Region != regionName || region.GameMode != gamemode {
+		if (regionName != "" && region.Region != regionName) || region.GameMode != gamemode {
 			continue
 		}
 
@@ -119,35 +192,16 @@ func main() {
 	runtime.LockOSThread() // Lock this to the OS thread. We'll use this thread for rendering and event handling.
 	sdl.Init(sdl.INIT_EVERYTHING)
 
+	ttf.Init()
+
 	run(g)
 
-	/*mainLoop:
-	for {
-		startTicks := sdl.GetTicks()
-		for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
-			switch event.(type) {
-			case *sdl.QuitEvent:
-				break mainLoop
-			}
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		if err != nil {
+			log.Fatal(err)
 		}
-		for g.RunOnce() {
-		}
-
-		if updated {
-			gameHelper.Tick(g)
-			updated = false
-		}
-
-		gameHelper.Redraw()
-
-		frameMs := sdl.GetTicks() - startTicks
-
-		log.Printf("frame took %dms (Time until next frame: %dms)", frameMs, frameTime-frameMs)
-
-		frameSleep := int32(frameTime) - int32(frameMs)
-		if frameSleep <= 0 {
-			continue
-		}
-		sdl.Delay(uint32(frameSleep))
-	}*/
+		pprof.WriteHeapProfile(f)
+		f.Close()
+	}
 }

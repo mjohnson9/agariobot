@@ -1,12 +1,16 @@
 package main
 
 import (
+	"image/color"
 	"log"
+	"math"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/nightexcessive/agario"
 	"github.com/veandco/go-sdl2/sdl"
+	"github.com/veandco/go-sdl2/sdl_ttf"
 )
 
 const (
@@ -15,16 +19,21 @@ const (
 )
 
 func createGame(internalGame *agario.Game) *game {
+	var err error
+
 	g := &game{
 		Game:         internalGame,
 		nicknameSent: time.Time{},
+		zoom:         1.0,
 	}
 
 	g.ai = &AI{
 		g: g,
-	}
 
-	var err error
+		Predators: make([]*agario.Cell, 0),
+		Prey:      make([]*agario.Cell, 0),
+		Food:      make([]*agario.Cell, 0),
+	}
 
 	g.window, err = sdl.CreateWindow("agariobot", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, windowWidth, windowHeight, sdl.WINDOW_SHOWN)
 	if err != nil {
@@ -36,6 +45,8 @@ func createGame(internalGame *agario.Game) *game {
 		panic(err)
 	}
 
+	g.renderer.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
+
 	return g
 }
 
@@ -44,6 +55,8 @@ type game struct {
 	renderer *sdl.Renderer
 
 	ai *AI
+
+	zoom float32
 
 	nicknameSent      time.Time
 	nicknameRetrySent bool
@@ -66,12 +79,18 @@ func (g *game) Tick(dt time.Duration) bool {
 		g.Map = createMap(g.Game)
 	}*/
 
+	cells := g.getSortedCells()
+
 	if len(g.Game.MyIDs) == 0 {
+		if cells != nil {
+			g.Redraw(cells)
+		}
 		const (
 			idResendTime = 1 * time.Second
 			idWaitTime   = 3 * time.Second
 		)
 		if g.nicknameSent.IsZero() {
+			name := randomName()
 			log.Printf("Sent my nickname: %s", name)
 			g.Game.SendNickname(name)
 			g.nicknameSent = time.Now()
@@ -82,7 +101,8 @@ func (g *game) Tick(dt time.Duration) bool {
 			log.Printf("Giving up after waiting %s for a new spawn", idWaitTime)
 			return false
 		} else if timeSinceSent > idResendTime && !g.nicknameRetrySent {
-			log.Println("Retrying sending my nickname...")
+			name := randomName()
+			log.Printf("Retrying sending my nickname (%s)...", name)
 			g.Game.SendNickname(name)
 			g.nicknameRetrySent = true
 			return true
@@ -96,43 +116,50 @@ func (g *game) Tick(dt time.Duration) bool {
 		g.nicknameRetrySent = false
 	}
 
-	me := g.getOwnCell()
-	if me == nil {
+	if !g.ownCellExists() {
 		log.Printf("Can't find own cell")
+		g.Redraw(cells)
 		return true
 	}
 
-	cells := g.getSortedCells()
-
 	g.ai.Update(dt)
-	g.ai.Execute()
 
-	g.Redraw(cells, me)
+	g.zoom = calculateZoom(g.ai.Me.Size)
+
+	g.Redraw(cells)
 
 	return true
 }
 
 const lineInterval = 100
 
-func (g *game) Redraw(cells []*agario.CellUpdate, me *agario.CellUpdate) {
+func (g *game) Redraw(cells []*agario.Cell) {
+	f, err := ttf.OpenFont("Ubuntu.ttf", int(14.0/g.zoom))
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
 	g.renderer.SetDrawColor(255, 255, 255, sdl.ALPHA_OPAQUE)
 	g.renderer.Clear()
 
-	meHalf := me.Size / 2
+	g.renderer.SetScale(g.zoom, g.zoom)
+
+	if g.ai == nil || g.ai.Me == nil {
+		return
+	}
+
+	meHalf := g.ai.Me.Size / 2
+
+	meX := int32(g.ai.Me.Position.X())
+	meY := int32(g.ai.Me.Position.Y())
 
 	camera := &sdl.Point{
-		X: int32((me.X + meHalf/2) - (windowWidth / 2)),
-		Y: int32((me.Y + meHalf/2) - (windowHeight / 2)),
+		X: (meX + meHalf/2) - int32(windowWidth/g.zoom/2),
+		Y: (meY + meHalf/2) - int32(windowHeight/g.zoom/2),
 	}
 
 	g.renderer.SetDrawColor(230, 230, 230, sdl.ALPHA_OPAQUE)
-
-	g.renderer.DrawRect(&sdl.Rect{
-		X: int32(g.Game.Board.Left) - camera.X,
-		Y: int32(g.Game.Board.Top) - camera.Y,
-		W: int32(g.Game.Board.Right - g.Game.Board.Left),
-		H: int32(g.Game.Board.Top - g.Game.Board.Bottom),
-	})
 
 	for x := int32(g.Game.Board.Left); x <= int32(g.Game.Board.Right); x += lineInterval {
 		points := []sdl.Point{{x - camera.X, int32(g.Game.Board.Top) - camera.Y}, {x - camera.X, int32(g.Game.Board.Bottom) - camera.Y}}
@@ -144,14 +171,22 @@ func (g *game) Redraw(cells []*agario.CellUpdate, me *agario.CellUpdate) {
 		g.renderer.DrawLines(points)
 	}
 
-	eatMeSize := int16(float64(me.Size)*1.25) - 1
-	canEatSize := int16(float64(me.Size)/1.25) + 1
+	points := []sdl.Point{{int32(g.Game.Board.Right) - camera.X, int32(g.Game.Board.Top) - camera.Y}, {int32(g.Game.Board.Right) - camera.X, int32(g.Game.Board.Bottom) - camera.Y}}
+	g.renderer.DrawLines(points)
+
+	points = []sdl.Point{{int32(g.Game.Board.Left) - camera.X, int32(g.Game.Board.Bottom) - camera.Y}, {int32(g.Game.Board.Right) - camera.X, int32(g.Game.Board.Bottom) - camera.Y}}
+	g.renderer.DrawLines(points)
+
+	eatMeSize := int32(float64(g.ai.SmallestOwnCell.Size)*eatSizeRequirement) - 1
+	splitEatMeSize := (eatMeSize - 10) * 2
+	canEatSize := int32(float64(g.ai.SmallestOwnCell.Size)/eatSizeRequirement) + 1
+	canSplitKillSize := canEatSize / 2
 
 	for _, cell := range cells {
-		drawSize := cell.Size + 40
-		halfDrawSize := drawSize / 2
+		/*drawSize := int32(float32(cell.Size) * 1.35)
+		halfDrawSize := drawSize / 2*/
 
-		startX, startY := cell.X-halfDrawSize, cell.Y-halfDrawSize
+		x, y := int32(cell.Position.X()), int32(cell.Position.Y())
 
 		_, myCell := g.Game.MyIDs[cell.ID]
 
@@ -163,24 +198,34 @@ func (g *game) Redraw(cells []*agario.CellUpdate, me *agario.CellUpdate) {
 			case stateHunting:
 				g.renderer.SetDrawColor(220, 20, 60, sdl.ALPHA_OPAQUE)
 			case stateFeeding:
-				g.renderer.SetDrawColor(0, 128, 128, sdl.ALPHA_OPAQUE)
-			case stateIdle:
-				g.renderer.SetDrawColor(30, 30, 30, sdl.ALPHA_OPAQUE)
-			default:
 				g.renderer.SetDrawColor(100, 100, 250, sdl.ALPHA_OPAQUE)
+			case stateIdle:
+				g.renderer.SetDrawColor(100, 100, 100, sdl.ALPHA_OPAQUE)
+			default:
+				g.renderer.SetDrawColor(0, 0, 0, sdl.ALPHA_OPAQUE)
 			}
-		case cell.Virus:
-			g.renderer.SetDrawColor(180, 180, 180, sdl.ALPHA_OPAQUE)
+		case cell.Size <= foodMaxSize: // Food cell
+			c := cell.Color.(color.RGBA)
+			g.renderer.SetDrawColor(c.R, c.G, c.B, c.A)
+		case cell.IsVirus:
+			g.renderer.SetDrawColor(51, 255, 51, sdl.ALPHA_OPAQUE)
+		case cell.Size >= splitEatMeSize:
+			g.renderer.SetDrawColor(0, 0, 0, sdl.ALPHA_OPAQUE)
 		case cell.Size >= eatMeSize:
 			g.renderer.SetDrawColor(250, 100, 100, sdl.ALPHA_OPAQUE)
+		case cell.Size <= canSplitKillSize:
+			g.renderer.SetDrawColor(237, 122, 162, sdl.ALPHA_OPAQUE)
 		case cell.Size <= canEatSize:
 			g.renderer.SetDrawColor(100, 250, 100, sdl.ALPHA_OPAQUE)
 		default:
-			//g.renderer.SetDrawColor(cell.R, cell.G, cell.B, sdl.ALPHA_OPAQUE)
 			g.renderer.SetDrawColor(160, 82, 45, sdl.ALPHA_OPAQUE)
 		}
 
-		rect := &sdl.Rect{
+		headingLen := float32(cell.Size) * 2
+		points := []sdl.Point{{x - camera.X, y - camera.Y}, {x + int32(cell.Heading.X()*headingLen) - camera.X, y + int32(cell.Heading.Y()*headingLen) - camera.Y}}
+		g.renderer.DrawLines(points)
+
+		/*rect := &sdl.Rect{
 			X: int32(startX) - camera.X,
 			Y: int32(startY) - camera.Y,
 
@@ -188,40 +233,93 @@ func (g *game) Redraw(cells []*agario.CellUpdate, me *agario.CellUpdate) {
 			H: int32(drawSize),
 		}
 
-		g.renderer.FillRect(rect)
+		g.renderer.FillRect(rect)*/
+		fillCircle(g.renderer, &sdl.Point{x - camera.X, y - camera.Y}, int(cell.Size))
+
+		name := cell.Name
+		if len(name) > 0 {
+			name += " (" + strconv.Itoa(int(cell.Size)) + ")"
+			g.renderText(name, f, sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}, sdl.Point{x - camera.X, y - camera.Y + cell.Size}, true)
+		} else {
+			g.renderText("("+strconv.Itoa(int(cell.Size))+")", f, sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}, sdl.Point{x - camera.X + cell.Size/2, y - camera.Y + cell.Size}, true)
+		}
 	}
 
-	/*if path != nil {
-		points := make([]sdl.Point, 1+len(path))
-
-		points[0] = sdl.Point{int32(me.X) - camera.X, int32(me.Y) - camera.Y}
-
-		for i, rawNode := range path {
-			node := rawNode.(MapNode)
-			points[i+1] = sdl.Point{int32(node.X) - camera.X, int32(node.Y) - camera.Y}
+	if g.ai.Path != nil {
+		points := make([]sdl.Point, 0, len(g.ai.Path))
+		for _, vec := range g.ai.Path {
+			points = append(points, sdl.Point{int32(vec[0]) - camera.X, int32(vec[1]) - camera.Y})
 		}
 
 		g.renderer.SetDrawColor(50, 50, 50, sdl.ALPHA_OPAQUE)
 		g.renderer.DrawLines(points)
-	}*/
 
-	/*if g.NodeList != nil {
-		g.renderer.SetDrawColor(255, 0, 0, sdl.ALPHA_OPAQUE)
-
-		for _, rawNode := range g.NodeList {
-			node := rawNode.(MapNode)
-			if (node.X+1 < camera.MinX || node.X-1 > camera.MaxX) || (node.Y+1 < camera.MinY || node.Y-1 > camera.MaxY) {
-				continue
-			}
-			g.renderer.DrawPoint(int(node.X-camera.MinX), int(node.Y-camera.MinY))
-			g.renderer.DrawPoint(int(node.X-camera.MinX)-1, int(node.Y-camera.MinY))
-			g.renderer.DrawPoint(int(node.X-camera.MinX)+1, int(node.Y-camera.MinY))
-			g.renderer.DrawPoint(int(node.X-camera.MinX), int(node.Y-camera.MinY)-1)
-			g.renderer.DrawPoint(int(node.X-camera.MinX), int(node.Y-camera.MinY)+1)
+		g.renderer.SetDrawColor(0, 100, 0, sdl.ALPHA_OPAQUE)
+		for _, vec := range g.ai.Path {
+			x, y := int(vec[0])-int(camera.X), int(vec[1])-int(camera.Y)
+			g.renderer.DrawLine(x-costMapReduction/4, y, x+costMapReduction/4, y)
+			g.renderer.DrawLine(x, y-costMapReduction/4, x, y+costMapReduction/4)
 		}
-	}*/
+	}
+
+	for x, rows := range g.ai.Map {
+		for y, v := range rows {
+			g.renderer.SetDrawColor(255, 0, 0, uint8(255*(v/costDoNotPass)))
+
+			/*g.renderer.FillRect(&sdl.Rect{
+				X: int32(x*costMapReduction) - camera.X,
+				Y: int32(y*costMapReduction) - camera.Y,
+
+				W: costMapReduction,
+				H: costMapReduction,
+			})*/
+
+			screenX := int(int32(x*costMapReduction) - camera.X)
+			screenY := int(int32(y*costMapReduction) - camera.Y)
+
+			g.renderer.DrawLine(screenX, screenY-costMapReduction/2, screenX, screenY+costMapReduction/2)
+			g.renderer.DrawLine(screenX-costMapReduction/2, screenY, screenX+costMapReduction/2, screenY)
+		}
+	}
+
+	leaderboardY := int32(0)
+	for i, item := range g.Game.Leaderboard {
+		name := item.Name
+		if name == "" {
+			name = "an unnamed cell"
+		}
+		c := sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}
+		if _, myCell := g.Game.MyIDs[item.ID]; myCell {
+			c = sdl.Color{250, 100, 100, sdl.ALPHA_OPAQUE}
+		}
+		_, h := g.renderText(strconv.Itoa(i+1)+". "+name, f, c, sdl.Point{0, leaderboardY}, false)
+		leaderboardY += h + 3
+	}
+
+	statusY := int32(0)
+	for _, msg := range g.ai.Status {
+		_, h := g.renderText(msg, f, sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}, sdl.Point{int32(windowWidth / g.zoom / 2), statusY}, true)
+		statusY += h + 3
+	}
 
 	g.renderer.Present()
+}
+
+func (g *game) renderText(str string, f *ttf.Font, color sdl.Color, p sdl.Point, center bool) (w, h int32) {
+	fw, fh, _ := f.SizeUTF8(str)
+	w, h = int32(fw), int32(fh)
+	fontRendered, _ := f.RenderUTF8_Solid(str, color)
+	defer fontRendered.Free()
+	t, _ := g.renderer.CreateTextureFromSurface(fontRendered)
+	defer t.Destroy()
+	var drawRect *sdl.Rect
+	if !center {
+		drawRect = &sdl.Rect{p.X, p.Y, w, h}
+	} else {
+		drawRect = &sdl.Rect{p.X - w/2, p.Y, w, h}
+	}
+	g.renderer.Copy(t, nil, drawRect)
+	return
 }
 
 func (g *game) Close() error {
@@ -230,21 +328,18 @@ func (g *game) Close() error {
 	return nil
 }
 
-func (g *game) getOwnCell() *agario.CellUpdate {
-	var largest *agario.CellUpdate
+func (g *game) ownCellExists() bool {
 	for id := range g.Game.MyIDs {
-		cell, ok := g.Game.Cells[id]
+		_, ok := g.Game.Cells[id]
 		if !ok {
 			continue
 		}
-		if largest == nil || cell.Size > largest.Size || (cell.Size == largest.Size && cell.ID < largest.ID) {
-			largest = cell
-		}
+		return true
 	}
-	return largest
+	return false
 }
 
-type cellArray []*agario.CellUpdate
+type cellArray []*agario.Cell
 
 func (p cellArray) Len() int { return len(p) }
 func (p cellArray) Less(i, j int) bool {
@@ -255,8 +350,8 @@ func (p cellArray) Less(i, j int) bool {
 }
 func (p cellArray) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
-func (g *game) getSortedCells() []*agario.CellUpdate {
-	cells := make([]*agario.CellUpdate, len(g.Game.Cells))
+func (g *game) getSortedCells() []*agario.Cell {
+	cells := make([]*agario.Cell, len(g.Game.Cells))
 
 	i := 0
 	for _, cell := range g.Game.Cells {
@@ -267,4 +362,34 @@ func (g *game) getSortedCells() []*agario.CellUpdate {
 	sort.Sort(cellArray(cells))
 
 	return cells
+}
+
+func calculateZoom(totalSize int32) float32 {
+	f := math.Pow(math.Min(64.0/float64(totalSize), 1.0), 1.0/2.5)
+	d := f * math.Max(windowHeight/1080.0, windowWidth/1920.0)
+
+	return float32(d)
+}
+
+func fillCircle(s *sdl.Renderer, p *sdl.Point, radius int) {
+	pX, pY := int(p.X), int(p.Y)
+	x := radius
+	y := 0
+	decisionOver2 := 1 - x
+
+	for x >= y {
+		s.DrawLine(x+pX, y+pY, -x+pX, y+pY)
+		s.DrawLine(x+pX, -y+pY, -x+pX, -y+pY)
+
+		s.DrawLine(y+pX, x+pY, -y+pX, x+pY)
+		s.DrawLine(y+pX, -x+pY, -y+pX, -x+pY)
+
+		y++
+		if decisionOver2 <= 0 {
+			decisionOver2 += 2*y + 1
+		} else {
+			x--
+			decisionOver2 += 2*(y-x) + 1
+		}
+	}
 }

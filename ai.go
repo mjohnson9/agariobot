@@ -1,10 +1,21 @@
 package main
 
 import (
+	"fmt"
 	"math"
+	"sort"
+	"strconv"
 	"time"
 
+	"github.com/go-gl/mathgl/mgl32"
+	"github.com/gonum/graph"
+	"github.com/gonum/graph/search"
+	"github.com/gonum/graph/traverse"
 	"github.com/nightexcessive/agario"
+)
+
+const (
+	eatSizeRequirement = 1.25
 )
 
 const (
@@ -17,90 +28,145 @@ const (
 type AI struct {
 	g *game
 
-	State byte
+	Me              *agario.Cell
+	SmallestOwnCell *agario.Cell
 
-	OwnCells []*agario.CellUpdate
+	State  byte
+	Status []string
+	Path   []mgl32.Vec2
 
-	Predators []*agario.CellUpdate
-	Prey      []*agario.CellUpdate
-	Food      []*agario.CellUpdate
+	Map Map
+
+	timeToNextSplit time.Duration
+
+	OwnCells []*agario.Cell
+
+	Predators []*agario.Cell
+	Prey      []*agario.Cell
+	Food      []*agario.Cell
 }
 
+const foodMaxSize = 20
+
 func (ai *AI) Update(dt time.Duration) {
-	ai.updateOwnCells()
-
-	me := ai.getSmallestCell()
-
-	ai.Predators = make([]*agario.CellUpdate, 0)
-	ai.Prey = make([]*agario.CellUpdate, 0)
-	ai.Food = make([]*agario.CellUpdate, 0)
-
-	ignoreSize := me.Size / 10
-	if ignoreSize < 100 {
-		ignoreSize = 100
+	if ai.timeToNextSplit > 0 {
+		ai.timeToNextSplit -= dt
 	}
 
-	predatorSize := int16(float64(me.Size)*1.25) - 1
-	preySize := int16(float64(me.Size) / 1.25)
+	ai.Status = ai.Status[0:0]
+
+	ai.updateOwnCells()
+
+	ai.Me = ai.getPseudoMe()
+	ai.SmallestOwnCell = ai.getSmallestOwnCell()
+
+	ai.Predators = ai.Predators[0:0]
+	ai.Prey = ai.Prey[0:0]
+	ai.Food = ai.Food[0:0]
+
+	predatorSize := int32(float32(ai.SmallestOwnCell.Size)*eatSizeRequirement) - 1
+
+	preySize := int32(float32(ai.SmallestOwnCell.Size) / eatSizeRequirement)
 
 	for _, cell := range ai.g.Game.Cells {
+		if cell.IsVirus {
+			continue
+		}
+
 		if _, myCell := ai.g.Game.MyIDs[cell.ID]; myCell {
 			continue
 		}
 
 		switch {
-		case cell.Size < 10: // Food. Players start at 10 and can't fall below it.
+		case cell.Size <= 20: // Food. Players start at 10 and can't fall below it.
 			ai.Food = append(ai.Food, cell)
-		case cell.Size <= preySize:
+		case cell.Size <= preySize /* && cell.Size > ignoreSize*/ :
 			ai.Prey = append(ai.Prey, cell)
 		case cell.Size >= predatorSize:
 			ai.Predators = append(ai.Predators, cell)
 		}
 	}
+
+	sort.Sort(sort.Reverse(cellArray(ai.Food)))
+	sort.Sort(sort.Reverse(cellArray(ai.Prey)))
+	sort.Sort(sort.Reverse(cellArray(ai.Predators)))
+
+	ai.buildCostMap()
+
+	ai.Execute()
 }
 
 func (ai *AI) Execute() {
-	me := ai.getSmallestCell()
-
-	if len(ai.Predators) > 0 {
-		isFleeing := ai.flee(me)
+	/*if len(ai.Predators) > 0 {
+		isFleeing := ai.flee()
 		if isFleeing {
 			ai.State = stateFleeing
 			return
 		}
-	}
+	} else {
+		ai.addStatusMessage("Not fleeing: No known predators")
+	}*/
+	ai.addStatusMessage("Not fleeing: Disabled")
 
 	if len(ai.Prey) > 0 {
-		isHunting := ai.hunt(me)
+		isHunting := ai.hunt()
 		if isHunting {
 			ai.State = stateHunting
 			return
 		}
+
+		isChasing := ai.chase()
+		if isChasing {
+			ai.State = stateHunting
+			return
+		}
+	} else {
+		ai.addStatusMessage("Not hunting: No known prey")
+		ai.addStatusMessage("Not chasing: No known prey")
 	}
 
 	if len(ai.Food) > 0 {
-		isFeeding := ai.feed(me)
+		isFeeding := ai.feed()
 		if isFeeding {
 			ai.State = stateFeeding
 			return
 		}
+	} else {
+		ai.addStatusMessage("Not feeding: No known food")
 	}
 
-	ai.g.Game.SetTargetPos(float64(me.Point.X), float64(me.Point.Y))
+	ai.addStatusMessage("Wandering")
+	mapCenter := mgl32.Vec2{float32(ai.g.Game.Board.Bottom) / 2, float32(ai.g.Game.Board.Right) / 2}
+	ai.movePathed(mapCenter)
 	ai.State = stateIdle
 }
 
 // flee moves directly away from the nearest cell that is capable of eating us
-func (ai *AI) flee(me *agario.CellUpdate) bool {
-	closestPredator := ai.getClosest(me.Point, ai.Predators)
-	if closestPredator == nil {
+func (ai *AI) flee() bool {
+	canBeSplitKilledBySize := int32((float64(ai.SmallestOwnCell.Size)*eatSizeRequirement - 10) * 2)
+	ignoreSplitKillSize := ai.SmallestOwnCell.Size * 4 // If they're 4x larger than us, they're unlikely to split to kill us
+	closestDangerousPredator := ai.getClosestFiltered(ai.Me.Position, ai.Predators, func(cell *agario.Cell) bool {
+		dist := dist2(ai.Me.Position, cell.Position)
+
+		eatDistance := square((float32(cell.Size) - float32(ai.Me.Size)*0.35) + 100)
+		if dist <= eatDistance {
+			return true
+		}
+		if cell.Size < canBeSplitKilledBySize || cell.Size >= ignoreSplitKillSize {
+			return false
+		}
+
+		splitDistance := cell.SplitDistance()
+		return dist2(ai.Me.Position, cell.Position) <= splitDistance
+	})
+	if closestDangerousPredator == nil {
+		ai.addStatusMessage("Not fleeing: No dangerous predators nearby")
 		return false
 	}
 
 	// Find angle between us and the predator
-	deltaX := float64(closestPredator.X - me.X)
-	deltaY := float64(closestPredator.Y - me.Y)
-	angle := math.Atan2(deltaX, deltaY)
+	delta := closestDangerousPredator.Position.Sub(ai.Me.Position)
+	angle := math.Atan2(float64(delta.X()), float64(delta.Y()))
 
 	if angle > math.Pi {
 		angle -= math.Pi
@@ -109,54 +175,184 @@ func (ai *AI) flee(me *agario.CellUpdate) bool {
 	}
 
 	// Position to move to
-	targetX := float64(me.X) + (500 * math.Sin(angle))
-	targetY := float64(me.Y) + (500 * math.Cos(angle))
+	targetX := ai.Me.Position.X() + float32(500*math.Sin(angle))
+	targetY := ai.Me.Position.Y() + float32(500*math.Cos(angle))
 
-	ai.g.Game.SetTargetPos(targetX, targetY)
+	ai.addStatusMessage("Fleeing from " + prettyCellName(closestDangerousPredator))
+	ai.movePathed(mgl32.Vec2{targetX, targetY})
 
 	return true
 }
 
 // hunt attempts to kill the closest cell that can be killed by splitting
-func (ai *AI) hunt(me *agario.CellUpdate) bool {
+func (ai *AI) hunt() bool {
 	if len(ai.OwnCells) > 1 {
+		ai.addStatusMessage("Not hunting: Too many splits")
 		// We won't intentionally split into more than two
 		return false
 	}
-
-	canSplitKillSize := int16(float64(me.Size) / 2 / 1.25)
-	splitDistance := square(4*(40+(ai.getSpeed(me)*4)) + (float64(me.Size) * 1.75))
-
-	closestPrey := ai.getClosestFiltered(me.Point, ai.Prey, func(cell *agario.CellUpdate) bool {
-		return cell.Size <= canSplitKillSize && dist2(me.Point, cell.Point) <= splitDistance
-	})
-	if closestPrey == nil {
+	if ai.SmallestOwnCell.Size <= 36 {
+		ai.addStatusMessage("Not hunting: Too small")
+		// We can't split unless we have at least 36 mass
 		return false
 	}
 
-	ai.g.Game.SetTargetPos(float64(closestPrey.Point.X), float64(closestPrey.Point.Y))
-	ai.g.Game.Split()
+	canSplitKillSize := int32(float32(ai.SmallestOwnCell.Size) / 2 / eatSizeRequirement)
+	splitDistance := square(4*(40+(ai.SmallestOwnCell.Speed()*4)) + (float32(ai.SmallestOwnCell.Size) * 1.75))
+
+	closestPrey := ai.getClosestFiltered(ai.Me.Position, ai.Prey, func(cell *agario.Cell) bool {
+		return cell.Size <= canSplitKillSize && dist2(ai.Me.Position, cell.Position) < splitDistance
+	})
+	if closestPrey == nil {
+		ai.addStatusMessage("Not hunting: No prey to split kill")
+		return false
+	}
+
+	ai.addStatusMessage("Splitting on " + prettyCellName(closestPrey))
+	ai.Path = []mgl32.Vec2{ai.Me.Position, closestPrey.Position}
+	ai.g.Game.SetTargetPos(closestPrey.Position.X(), closestPrey.Position.Y())
+	if ai.timeToNextSplit <= 0 {
+		ai.g.Game.Split()
+		ai.timeToNextSplit = 250 * time.Millisecond
+	}
+
+	return true
+}
+
+// chase attempts to eat another blob by getting close enough to split on it
+func (ai *AI) chase() bool {
+	/*canKillSize := int16(float64(me.Size) / 2 / eatSizeRequirement)
+	splitDistance := square(4*(40+(ai.getSpeed(me)*4)) + (float64(me.Size) * 1.75))*/
+
+	closestPrey := ai.getClosest(ai.Me.Position, ai.Prey)
+	if closestPrey == nil {
+		ai.addStatusMessage("Not chasing: No prey")
+		return false
+	}
+
+	ai.addStatusMessage("Chasing " + prettyCellName(closestPrey))
+	ai.movePathed(closestPrey.Position)
 
 	return true
 }
 
 // feed attempts to eat the nearest food cell
-func (ai *AI) feed(me *agario.CellUpdate) bool {
-	closestFood := ai.getClosest(me.Point, ai.Food)
+func (ai *AI) feed() bool {
+	/*if ai.Me.Size >= 150 {
+		ai.addStatusMessage("Not feeding: Too large")
+		return false
+	}*/
+
+	closestFood := ai.getClosest(ai.Me.Position, ai.Food)
 	if closestFood == nil {
+		ai.addStatusMessage("Not feeding: No food pellets")
 		return false
 	}
 
-	ai.g.Game.SetTargetPos(float64(closestFood.Point.X), float64(closestFood.Point.Y))
+	ai.addStatusMessage("Eating food pellets")
+	ai.movePathed(closestFood.Position)
 
 	return true
 }
 
-func (ai *AI) getClosest(p agario.Point, cells []*agario.CellUpdate) *agario.CellUpdate {
-	var closest *agario.CellUpdate
-	closestDist := math.MaxFloat64
-	for _, cell := range ai.OwnCells {
-		dist := dist2(p, cell.Point)
+const (
+	costMapReduction = 100
+
+	costDoNotPass = 1024
+)
+
+func (ai *AI) buildCostMap() {
+	w, h := int(ai.g.Game.Board.Right/costMapReduction), int(ai.g.Game.Board.Bottom/costMapReduction)
+	ai.Map = NewMap(w+1, h+1)
+
+	for x := 0; x < w; x++ {
+		ai.Map[x][0] = costDoNotPass / 2
+		ai.Map[x][1] += costDoNotPass / 3
+		ai.Map[x][2] += costDoNotPass / 4
+		ai.Map[x][3] += costDoNotPass / 5
+
+		ai.Map[x][h] = costDoNotPass / 2
+		ai.Map[x][h-1] = costDoNotPass / 3
+		ai.Map[x][h-2] = costDoNotPass / 4
+		ai.Map[x][h-3] = costDoNotPass / 5
+	}
+
+	for y := 0; y < h; y++ {
+		ai.Map[0][y] = costDoNotPass / 2
+		ai.Map[1][y] = costDoNotPass / 3
+		ai.Map[2][y] = costDoNotPass / 4
+		ai.Map[3][y] = costDoNotPass / 5
+
+		ai.Map[w][y] = costDoNotPass / 2
+		ai.Map[w-1][y] = costDoNotPass / 3
+		ai.Map[w-2][y] = costDoNotPass / 4
+		ai.Map[w-3][y] = costDoNotPass / 5
+	}
+
+	for _, cell := range ai.Predators {
+		size := float32(cell.Size) + 100.0
+
+		startX, startY := cell.Position.X()-size, cell.Position.Y()-size
+		endX, endY := startX+size*2, startY+size*2
+
+		startXScaled, startYScaled := int(startX)/costMapReduction, int(startY)/costMapReduction
+
+		if startXScaled < 0 {
+			startXScaled = 0
+		}
+		if startYScaled < 0 {
+			startYScaled = 0
+		}
+
+		xMax := int(endX)/costMapReduction + 2
+		if xMax > w {
+			xMax = w
+		}
+		yMax := int(endY)/costMapReduction + 2
+		if yMax > h {
+			yMax = h
+		}
+		for xScaled := startXScaled; xScaled < xMax; xScaled++ {
+			for yScaled := startYScaled; yScaled < yMax; yScaled++ {
+				ai.Map[xScaled][yScaled] = costDoNotPass
+			}
+		}
+	}
+}
+
+type filterFunc func(*agario.Cell) bool
+
+func (ai *AI) cellsUntil(cells []*agario.Cell, filter filterFunc) func(graph.Node, int) bool {
+	cellPositions := make(map[int]struct{})
+
+	for _, c := range cells {
+		if filter != nil && !filter(c) {
+			continue
+		}
+		node := ai.Map.GetNode(gameToCostMap(c.Position.X(), c.Position.Y()))
+		cellPositions[node.ID()] = struct{}{}
+	}
+
+	return func(n graph.Node, d int) bool {
+		_, ok := cellPositions[n.ID()]
+
+		return ok
+	}
+}
+
+func (ai *AI) getClosest(p mgl32.Vec2, cells []*agario.Cell) *agario.Cell {
+	return ai.getClosestFiltered(p, cells, nil)
+}
+
+func (ai *AI) getClosestFiltered(p mgl32.Vec2, cells []*agario.Cell, filter filterFunc) *agario.Cell {
+	/*var closest *agario.Cell
+	closestDist := float32(math.MaxFloat32)
+	for _, cell := range cells {
+		if filter != nil && !filter(cell) {
+			continue
+		}
+
+		dist := dist2(p, cell.Position)
 		if closest == nil {
 			closest = cell
 			closestDist = dist
@@ -168,50 +364,100 @@ func (ai *AI) getClosest(p agario.Point, cells []*agario.CellUpdate) *agario.Cel
 			closestDist = dist
 		}
 	}
-	return closest
-}
+	return closest*/
 
-type filterFunc func(*agario.CellUpdate) bool
+	if len(cells) == 0 {
+		return nil
+	}
 
-func (ai *AI) getClosestFiltered(p agario.Point, cells []*agario.CellUpdate, filter filterFunc) *agario.CellUpdate {
-	var closest *agario.CellUpdate
-	closestDist := math.MaxFloat64
-	for _, cell := range ai.OwnCells {
-		if !filter(cell) {
-			continue
-		}
+	bfs := new(traverse.BreadthFirst)
+	visited := 0
+	bfs.Visit = func(u, v graph.Node) {
+		visited++
+	}
 
-		dist := dist2(p, cell.Point)
-		if closest == nil {
-			closest = cell
-			closestDist = dist
-			continue
-		}
+	n := bfs.Walk(ai.Map, ai.Map.GetNode(gameToCostMap(p.X(), p.Y())), ai.cellsUntil(cells, filter))
+	ai.addStatusMessage("BFS: visited " + strconv.Itoa(visited) + " nodes")
+	if n == nil {
+		return nil
+	}
 
-		if dist < closestDist || (dist == closestDist && cell.ID < closest.ID) {
-			closest = cell
-			closestDist = dist
+	mN := n.(*mapNode)
+
+	minX, minY := costMapToGame(mN.X, mN.Y)
+
+	//maxX := (minX + 1) * costMapReduction
+	//maxY := (minY + 1) * costMapReduction
+	maxX, maxY := costMapToGame(mN.X+1, mN.Y+1)
+
+	for _, c := range cells {
+		x := c.Position.X()
+		y := c.Position.Y()
+
+		if x >= minX && x < maxX && y >= minY && y < maxY {
+			return c
 		}
 	}
-	return closest
+
+	return nil
 }
 
-func (ai *AI) getSmallestCell() *agario.CellUpdate {
-	var smallest *agario.CellUpdate
+func (ai *AI) getPseudoMe() *agario.Cell {
+	firstCell := ai.OwnCells[0]
+	me := &agario.Cell{
+		ID:   firstCell.ID,
+		Name: firstCell.Name,
+
+		Heading: firstCell.Heading,
+
+		Color: firstCell.Color,
+
+		IsVirus: firstCell.IsVirus,
+	}
+	var avgPosition mgl32.Vec2
 	for _, cell := range ai.OwnCells {
-		if smallest == nil || cell.Size < smallest.Size || (cell.Size == smallest.Size && cell.ID < smallest.ID) {
+		me.Size += cell.Size
+
+		if avgPosition.X() == 0 && avgPosition.Y() == 0 {
+			avgPosition = cell.Position
+			continue
+		}
+
+		avgPosition = avgPosition.Add(cell.Position)
+	}
+
+	n := float32(len(ai.OwnCells))
+	avgPosition[0] = avgPosition[0] / n
+	avgPosition[1] = avgPosition[1] / n
+	me.Position = avgPosition
+
+	return me
+}
+
+func (ai *AI) getSmallestOwnCell() *agario.Cell {
+	var smallest *agario.Cell
+	for _, cell := range ai.OwnCells {
+		if smallest == nil {
+			smallest = cell
+			continue
+		}
+
+		if smallest.Size < cell.Size || (smallest.Size == cell.Size && cell.ID < smallest.ID) {
 			smallest = cell
 		}
 	}
 	return smallest
 }
 
-func (ai *AI) getSpeed(cell *agario.CellUpdate) float64 {
-	return 745.28 * math.Pow(float64(cell.Size), -0.222) * 50 / 1000
+func (ai *AI) getOurTotalSize() (s int32) {
+	for _, cell := range ai.OwnCells {
+		s += cell.Size
+	}
+	return
 }
 
 func (ai *AI) updateOwnCells() {
-	ai.OwnCells = make([]*agario.CellUpdate, 0, len(ai.g.Game.MyIDs))
+	ai.OwnCells = make([]*agario.Cell, 0, len(ai.g.Game.MyIDs))
 	for id := range ai.g.Game.MyIDs {
 		cell, found := ai.g.Game.Cells[id]
 		if !found {
@@ -221,13 +467,105 @@ func (ai *AI) updateOwnCells() {
 	}
 }
 
-func dist2(a, b agario.Point) float64 {
-	x1, y1 := float64(a.X), float64(a.Y)
-	x2, y2 := float64(b.X), float64(b.Y)
-
-	return square(x2-x1) + square(y2-y1)
+func (ai *AI) addStatusMessage(str string) {
+	ai.Status = append(ai.Status, str)
 }
 
-func square(a float64) float64 {
+func (ai *AI) movePathedUndirected(position mgl32.Vec2) {
+	undirectedMap := UndirectedMap(ai.Map)
+
+	meNode := ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem()))
+	positionNode := ai.Map.GetNode(gameToCostMap(position.Elem()))
+
+	path, cost, nodes := search.AStar(meNode, positionNode, undirectedMap, nil, nil)
+	if path == nil {
+		ai.addStatusMessage("Failed to find path. Moving directly to objective.")
+
+		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
+		ai.g.Game.SetTargetPos(position.X(), position.Y())
+		return
+	}
+	ai.addStatusMessage(fmt.Sprintf("A* (undirected): path cost: %.2f / nodes expanded: %d", cost, nodes))
+
+	ai.moveAlongPath(position, path)
+}
+
+func (ai *AI) movePathed(position mgl32.Vec2) {
+	minDistance2 := square(float32(ai.Me.Size + costMapReduction*1.3))
+
+	if dist2(ai.Me.Position, position) < minDistance2 {
+		ai.addStatusMessage("Objective is within minimum distance. Moving directly to objective.")
+
+		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
+		ai.g.Game.SetTargetPos(position.X(), position.Y())
+		return
+	}
+
+	meNode := ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem()))
+	positionNode := ai.Map.GetNode(gameToCostMap(position.Elem()))
+
+	path, cost, nodes := search.AStar(meNode, positionNode, ai.Map, nil, nil)
+	if path == nil {
+		ai.addStatusMessage("Failed to find path. Trying undirected.")
+
+		ai.movePathedUndirected(position)
+		return
+	}
+	ai.addStatusMessage(fmt.Sprintf("A*: path cost: %.2f / nodes expanded: %d", cost, nodes))
+
+	ai.moveAlongPath(position, path)
+}
+
+func (ai *AI) moveAlongPath(targetPosition mgl32.Vec2, path []graph.Node) {
+	minDistance2 := square(float32(ai.Me.Size + costMapReduction*1.3))
+
+	var pathNode *mapNode
+	var pathVecs []mgl32.Vec2
+	for _, rawNode := range path {
+		node := rawNode.(*mapNode)
+		pos := mgl32.Vec2{float32(node.X) * costMapReduction, float32(node.Y) * costMapReduction}
+
+		if pathNode == nil && dist2(ai.Me.Position, pos) >= minDistance2 {
+			pathNode = node
+		}
+
+		pathVecs = append(pathVecs, pos)
+	}
+
+	if pathNode == nil {
+		ai.addStatusMessage("Failed to find path node that was far enough away. Moving directly to objective.")
+
+		ai.Path = []mgl32.Vec2{ai.Me.Position, targetPosition}
+		ai.g.Game.SetTargetPos(targetPosition.X(), targetPosition.Y())
+		return
+	}
+
+	ai.Path = pathVecs
+	ai.g.Game.SetTargetPos(float32(pathNode.X*costMapReduction), float32(pathNode.Y*costMapReduction))
+}
+
+func dist2(a, b mgl32.Vec2) float32 {
+	diff := b.Sub(a)
+
+	return square(diff.X()) + square(diff.Y())
+}
+
+func square(a float32) float32 {
 	return a * a
+}
+
+func prettyCellName(cell *agario.Cell) string {
+	if cell.Name != "" {
+		return cell.Name + " (" + strconv.Itoa(int(cell.Size)) + ")"
+	}
+
+	return "an unnamed cell (" + strconv.Itoa(int(cell.Size)) + ")"
+}
+
+func costMapToGame(x, y int) (float32, float32) {
+	return float32(x * costMapReduction), float32(y * costMapReduction)
+}
+
+func gameToCostMap(x, y float32) (int, int) {
+	return int(x / costMapReduction), int(y / costMapReduction)
 }
