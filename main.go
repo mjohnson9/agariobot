@@ -7,15 +7,12 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/nightexcessive/agario"
 	"github.com/veandco/go-sdl2/sdl"
 	"github.com/veandco/go-sdl2/sdl_ttf"
-)
-
-const (
-	gamemode = "ffa"
 )
 
 const (
@@ -94,17 +91,20 @@ func run(ig *agario.Game) {
 	log.Printf("Input loop stopped gracefully")
 }
 
-//var randomNames = []string{"poland", "usa", "china", "russia", "canada", "australia", "spain", "brazil", "germany", "ukraine", "france", "sweden", "hitler", "north korea", "south korea", "japan", "united kingdom", "earth", "greece", "latvia", "lithuania", "estonia", "finland", "norway", "cia", "maldivas", "austria", "nigeria", "reddit", "yaranaika", "confederate", "9gag", "indiana", "4chan", "italy", "bulgaria", "tumblr", "2ch.hk", "hong kong", "portugal", "jamaica", "german empire", "mexico", "sanik", "switzerland", "croatia", "chile", "indonesia", "bangladesh", "thailand", "iran", "iraq", "peru", "moon", "botswana", "bosnia", "netherlands", "european union", "taiwan", "pakistan", "hungary", "satanist", "qing dynasty", "matriarchy", "patriarchy", "feminism", "ireland", "texas", "facepunch", "prodota", "cambodia", "steam", "piccolo", "ea", "india", "kc", "denmark", "quebec", "ayy lmao", "sealand", "bait", "tsarist russia", "origin", "vinesauce", "stalin", "belgium", "luxembourg", "stussy", "prussia", "8ch", "argentina", "scotland", "sir", "romania", "belarus", "wojak", "doge", "nasa", "byzantium", "imperial japan", "french kingdom", "somalia", "turkey", "mars", "pokerface", "8", "irs", "receita federal", "nazi", "ussr"}
+var randomNames = []string{"derp", "derp", "derp", "derp", "derp", "earth", "cia", "confederate", "sanik", "moon", "qing dynasty", "matriarchy", "patriarchy", "feminism", "steam", "bait", "vinesauce", "sir", "wojak", "doge", "nasa", "mars", "pokerface", "8", "irs", "receita federal"}
 
-var randomNames = []string{"Derp", "DerpBot"}
+//var randomNames = []string{"Derp", "DerpBot"}
 
 func randomName() string {
-	return randomNames[rand.Intn(len(randomNames))]
+	return strings.Title(randomNames[rand.Intn(len(randomNames))])
 }
 
 var (
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	memprofile = flag.String("memprofile", "", "write memory profile to this file")
+
+	gamemode = flag.String("gamemode", "ffa", "agar.io gamemode")
+	region   = flag.String("region", "", "agar.io region (blank = closest)")
 )
 
 func main() {
@@ -136,22 +136,26 @@ func main() {
 
 	log.Printf("Getting current location...")
 	desiredLocation := make(chan string, 1)
-	go func() {
-		curLocation, recommendedServer, err := agario.GetCurrentLocation()
-		if err != nil {
-			panic(err)
-		}
+	if *region == "" {
+		go func() {
+			curLocation, recommendedServer, err := agario.GetCurrentLocation()
+			if err != nil {
+				panic(err)
+			}
 
-		desiredLocation <- recommendedServer
+			desiredLocation <- recommendedServer
 
-		if len(recommendedServer) == 0 {
-			log.Printf("WARNING: could not find desired region for %s", curLocation)
-			return
-		}
+			if len(recommendedServer) == 0 {
+				log.Printf("WARNING: could not find desired region for %s", curLocation)
+				return
+			}
 
-		log.Printf("Got location: %s", curLocation)
-		log.Printf("Recommended server: %s", recommendedServer)
-	}()
+			log.Printf("Got location: %s", curLocation)
+			log.Printf("Recommended server: %s", recommendedServer)
+		}()
+	} else {
+		desiredLocation <- *region
+	}
 
 	log.Printf("Getting region info...")
 	info, err := agario.GetInfo()
@@ -163,7 +167,7 @@ func main() {
 
 	regionName := <-desiredLocation
 	for _, region := range info.Regions {
-		if (regionName != "" && region.Region != regionName) || region.GameMode != gamemode {
+		if (regionName != "" && region.Region != regionName) || region.GameMode != *gamemode {
 			continue
 		}
 

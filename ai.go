@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/go-gl/mathgl/mgl32"
+	"github.com/go-gl/mathgl/mgl64"
 	"github.com/gonum/graph"
 	"github.com/gonum/graph/search"
-	"github.com/gonum/graph/traverse"
 	"github.com/nightexcessive/agario"
 )
 
@@ -35,7 +35,8 @@ type AI struct {
 	Status []string
 	Path   []mgl32.Vec2
 
-	Map Map
+	Map         Map
+	DijkstraMap search.Shortest
 
 	timeToNextSplit time.Duration
 
@@ -67,6 +68,7 @@ func (ai *AI) Update(dt time.Duration) {
 	predatorSize := int32(float32(ai.SmallestOwnCell.Size)*eatSizeRequirement) - 1
 
 	preySize := int32(float32(ai.SmallestOwnCell.Size) / eatSizeRequirement)
+	ignoreSize := ai.SmallestOwnCell.Size / 4
 
 	for _, cell := range ai.g.Game.Cells {
 		if cell.IsVirus {
@@ -80,7 +82,7 @@ func (ai *AI) Update(dt time.Duration) {
 		switch {
 		case cell.Size <= 20: // Food. Players start at 10 and can't fall below it.
 			ai.Food = append(ai.Food, cell)
-		case cell.Size <= preySize /* && cell.Size > ignoreSize*/ :
+		case cell.Size <= preySize && cell.Size >= ignoreSize:
 			ai.Prey = append(ai.Prey, cell)
 		case cell.Size >= predatorSize:
 			ai.Predators = append(ai.Predators, cell)
@@ -92,6 +94,7 @@ func (ai *AI) Update(dt time.Duration) {
 	sort.Sort(sort.Reverse(cellArray(ai.Predators)))
 
 	ai.buildCostMap()
+	ai.DijkstraMap = search.DijkstraFrom(ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem())), UndirectedMap(ai.Map), nil)
 
 	ai.Execute()
 }
@@ -256,7 +259,7 @@ func (ai *AI) feed() bool {
 }
 
 const (
-	costMapReduction = 100
+	costMapReduction = 125
 
 	costDoNotPass = 1024
 )
@@ -289,33 +292,85 @@ func (ai *AI) buildCostMap() {
 		ai.Map[w-3][y] = costDoNotPass / 5
 	}
 
+	//canBeSplitKilledBySize := int32((float64(ai.SmallestOwnCell.Size)*eatSizeRequirement - 10) * 2)
+	//ignoreSplitKillSize := ai.Me.Size * 4 // If they're 4x larger than us, they're unlikely to split to kill us
+
 	for _, cell := range ai.Predators {
-		size := float32(cell.Size) + 100.0
+		x, y := gameToCostMap(cell.Position.Elem())
 
-		startX, startY := cell.Position.X()-size, cell.Position.Y()-size
-		endX, endY := startX+size*2, startY+size*2
+		/*if cell.Size >= canBeSplitKilledBySize && cell.Size <= ignoreSplitKillSize {
+			splitDistance := int(cell.SplitDistance()+100) / costMapReduction
+			setCostMapCircle(ai.Map, x, y, splitDistance, costDoNotPass/2)
+			setCostMapCircle(ai.Map, x+1, y+1, splitDistance, costDoNotPass/2)
+		}*/
 
-		startXScaled, startYScaled := int(startX)/costMapReduction, int(startY)/costMapReduction
+		size := (int(cell.Size) + 100) / costMapReduction
+		setCostMapCircle(ai.Map, x, y, size, costDoNotPass)
+		setCostMapCircle(ai.Map, x+1, y+1, size, costDoNotPass)
+	}
+}
 
-		if startXScaled < 0 {
-			startXScaled = 0
-		}
-		if startYScaled < 0 {
-			startYScaled = 0
+func setCostMapLine(m Map, x1, y1, x2, y2 int, value float32) {
+	if x1 != x2 && y1 != y2 {
+		panic("we can only draw straight lines")
+	}
+
+	w, h := m.width(), m.height()
+	if x1 != x2 {
+		if y1 < 0 || y1 >= h {
+			return
 		}
 
-		xMax := int(endX)/costMapReduction + 2
-		if xMax > w {
-			xMax = w
+		if x1 > x2 {
+			x1, x2 = x2, x1
 		}
-		yMax := int(endY)/costMapReduction + 2
-		if yMax > h {
-			yMax = h
+		if x1 < 0 {
+			x1 = 0
 		}
-		for xScaled := startXScaled; xScaled < xMax; xScaled++ {
-			for yScaled := startYScaled; yScaled < yMax; yScaled++ {
-				ai.Map[xScaled][yScaled] = costDoNotPass
-			}
+		if x2 >= w {
+			x2 = w - 1
+		}
+
+		for x := x1; x <= x2; x++ {
+			m[x][y1] = value
+		}
+	} else {
+		if x1 < 0 || x1 >= w {
+			return
+		}
+		if y1 > y2 {
+			y1, y2 = y2, y1
+		}
+		if y1 < 0 {
+			y1 = 0
+		}
+		if y2 >= h {
+			y2 = h - 1
+		}
+		for y := y1; y <= y2; y++ {
+			m[x1][y] = value
+		}
+	}
+}
+
+func setCostMapCircle(m Map, pX, pY int, radius int, value float32) {
+	x := radius
+	y := 0
+	decisionOver2 := 1 - x
+
+	for x >= y {
+		setCostMapLine(m, x+pX, y+pY, -x+pX, y+pY, value)
+		setCostMapLine(m, x+pX, -y+pY, -x+pX, -y+pY, value)
+
+		setCostMapLine(m, y+pX, x+pY, -y+pX, x+pY, value)
+		setCostMapLine(m, y+pX, -x+pY, -y+pX, -x+pY, value)
+
+		y++
+		if decisionOver2 <= 0 {
+			decisionOver2 += 2*y + 1
+		} else {
+			x--
+			decisionOver2 += 2*(y-x) + 1
 		}
 	}
 }
@@ -370,7 +425,29 @@ func (ai *AI) getClosestFiltered(p mgl32.Vec2, cells []*agario.Cell, filter filt
 		return nil
 	}
 
-	bfs := new(traverse.BreadthFirst)
+	var (
+		shortest     *agario.Cell
+		shortestCost = math.MaxFloat64
+	)
+	for _, c := range cells {
+		if filter != nil && !filter(c) {
+			continue
+		}
+
+		n := ai.Map.GetNode(gameToCostMap(c.Position.Elem()))
+		cost := ai.DijkstraMap.WeightTo(n)
+		/*if cost >= costDoNotPass {
+			continue
+		}*/
+		if shortest == nil || cost < shortestCost || (mgl64.FloatEqual(cost, shortestCost) && c.ID < shortest.ID) {
+			shortest = c
+			shortestCost = cost
+		}
+	}
+
+	return shortest
+
+	/*bfs := new(traverse.BreadthFirst)
 	visited := 0
 	bfs.Visit = func(u, v graph.Node) {
 		visited++
@@ -399,7 +476,7 @@ func (ai *AI) getClosestFiltered(p mgl32.Vec2, cells []*agario.Cell, filter filt
 		}
 	}
 
-	return nil
+	return nil*/
 }
 
 func (ai *AI) getPseudoMe() *agario.Cell {
@@ -471,7 +548,7 @@ func (ai *AI) addStatusMessage(str string) {
 	ai.Status = append(ai.Status, str)
 }
 
-func (ai *AI) movePathedUndirected(position mgl32.Vec2) {
+/*func (ai *AI) movePathedUndirected(position mgl32.Vec2) {
 	undirectedMap := UndirectedMap(ai.Map)
 
 	meNode := ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem()))
@@ -488,10 +565,10 @@ func (ai *AI) movePathedUndirected(position mgl32.Vec2) {
 	ai.addStatusMessage(fmt.Sprintf("A* (undirected): path cost: %.2f / nodes expanded: %d", cost, nodes))
 
 	ai.moveAlongPath(position, path)
-}
+}*/
 
 func (ai *AI) movePathed(position mgl32.Vec2) {
-	minDistance2 := square(float32(ai.Me.Size + costMapReduction*1.3))
+	minDistance2 := square(float32(ai.Me.Size) + costMapReduction*1.3)
 
 	if dist2(ai.Me.Position, position) < minDistance2 {
 		ai.addStatusMessage("Objective is within minimum distance. Moving directly to objective.")
@@ -501,23 +578,35 @@ func (ai *AI) movePathed(position mgl32.Vec2) {
 		return
 	}
 
-	meNode := ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem()))
+	// meNode := ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem()))
+	// positionNode := ai.Map.GetNode(gameToCostMap(position.Elem()))
+
+	// path, cost, nodes := search.AStar(meNode, positionNode, ai.Map, nil, nil)
+	// if path == nil {
+	// 	ai.addStatusMessage("Failed to find path. Trying undirected.")
+
+	// 	ai.movePathedUndirected(position)
+	// 	return
+	// }
+	// ai.addStatusMessage(fmt.Sprintf("A*: path cost: %.2f / nodes expanded: %d", cost, nodes))
+
 	positionNode := ai.Map.GetNode(gameToCostMap(position.Elem()))
-
-	path, cost, nodes := search.AStar(meNode, positionNode, ai.Map, nil, nil)
+	path, cost := ai.DijkstraMap.To(positionNode)
 	if path == nil {
-		ai.addStatusMessage("Failed to find path. Trying undirected.")
+		ai.addStatusMessage("movePathed: Failed to find path. Moving directly to objective.")
 
-		ai.movePathedUndirected(position)
+		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
+		ai.g.Game.SetTargetPos(position.X(), position.Y())
 		return
 	}
-	ai.addStatusMessage(fmt.Sprintf("A*: path cost: %.2f / nodes expanded: %d", cost, nodes))
+
+	ai.addStatusMessage(fmt.Sprintf("movePathed: path cost: %.2f", cost))
 
 	ai.moveAlongPath(position, path)
 }
 
 func (ai *AI) moveAlongPath(targetPosition mgl32.Vec2, path []graph.Node) {
-	minDistance2 := square(float32(ai.Me.Size + costMapReduction*1.3))
+	minDistance2 := square(float32(ai.Me.Size) + costMapReduction*1.3)
 
 	var pathNode *mapNode
 	var pathVecs []mgl32.Vec2

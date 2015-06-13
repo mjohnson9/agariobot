@@ -8,16 +8,16 @@ import (
 )
 
 var (
-	_ graph.DirectedGraph   = NewMap(10, 10)
-	_ graph.Graph           = NewMap(10, 10)
-	_ graph.Coster          = NewMap(10, 10)
-	_ graph.HeuristicCoster = NewMap(10, 10)
+	_ graph.DirectedGraph = NewMap(10, 10)
+	_ graph.Graph         = NewMap(10, 10)
+	_ graph.Coster        = NewMap(10, 10)
+	//_ graph.HeuristicCoster = NewMap(10, 10)
 )
 
 var (
-	_ graph.Graph           = UndirectedMap(NewMap(10, 10))
-	_ graph.Coster          = UndirectedMap(NewMap(10, 10))
-	_ graph.HeuristicCoster = UndirectedMap(NewMap(10, 10))
+	_ graph.Graph  = UndirectedMap(NewMap(10, 10))
+	_ graph.Coster = UndirectedMap(NewMap(10, 10))
+	//_ graph.HeuristicCoster = UndirectedMap(NewMap(10, 10))
 )
 
 func NewMap(w, h int) Map {
@@ -194,10 +194,10 @@ func (m Map) Cost(eRaw graph.Edge) float64 {
 
 	c := float64(square(float32(t.X-f.X)) + square(float32(t.Y-f.Y)))
 
-	return c
+	return c + m.heuristicCost(f, t)
 }
 
-func (m Map) HeuristicCost(fRaw, tRaw graph.Node) float64 {
+func (m Map) heuristicCost(fRaw, tRaw graph.Node) float64 {
 	//f := fRaw.(*mapNode)
 	t := tRaw.(*mapNode)
 
@@ -255,9 +255,9 @@ func (m UndirectedMap) EdgeBetween(node, neighbor graph.Node) graph.Edge {
 	return Map(m).EdgeBetween(node, neighbor)
 }
 
-func (m UndirectedMap) HeuristicCost(n1, n2 graph.Node) float64 {
+/*func (m UndirectedMap) HeuristicCost(n1, n2 graph.Node) float64 {
 	return Map(m).HeuristicCost(n1, n2)
-}
+}*/
 
 func (m UndirectedMap) Cost(e graph.Edge) float64 {
 	return Map(m).Cost(e)
