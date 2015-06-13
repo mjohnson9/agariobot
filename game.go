@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	windowWidth  = 1600
-	windowHeight = 900
+	initialWindowWidth  = 1280
+	initialWindowHeight = 720
 )
 
 func createGame(internalGame *agario.Game) *game {
@@ -35,7 +35,7 @@ func createGame(internalGame *agario.Game) *game {
 		Food:      make([]*agario.Cell, 0),
 	}
 
-	g.window, err = sdl.CreateWindow("agariobot", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, windowWidth, windowHeight, sdl.WINDOW_SHOWN)
+	g.window, err = sdl.CreateWindow("agariobot", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, initialWindowWidth, initialWindowHeight, sdl.WINDOW_SHOWN|sdl.WINDOW_RESIZABLE)
 	if err != nil {
 		panic(err)
 	}
@@ -124,8 +124,6 @@ func (g *game) Tick(dt time.Duration) bool {
 
 	g.ai.Update(dt)
 
-	g.zoom = calculateZoom(g.ai.Me.Size)
-
 	g.Redraw(cells)
 
 	return true
@@ -140,14 +138,18 @@ func (g *game) Redraw(cells []*agario.Cell) {
 	}
 	defer f.Close()
 
-	g.renderer.SetDrawColor(255, 255, 255, sdl.ALPHA_OPAQUE)
-	g.renderer.Clear()
-
 	g.renderer.SetScale(g.zoom, g.zoom)
 
 	if g.ai == nil || g.ai.Me == nil {
 		return
 	}
+
+	windowWidth, windowHeight := g.window.GetSize()
+
+	g.zoom = calculateZoom(g.ai.Me.Size, windowWidth, windowHeight)
+
+	g.renderer.SetDrawColor(255, 255, 255, sdl.ALPHA_OPAQUE)
+	g.renderer.Clear()
 
 	meHalf := g.ai.Me.Size / 2
 
@@ -155,8 +157,8 @@ func (g *game) Redraw(cells []*agario.Cell) {
 	meY := int32(g.ai.Me.Position.Y())
 
 	camera := &sdl.Point{
-		X: (meX + meHalf/2) - int32(windowWidth/g.zoom/2),
-		Y: (meY + meHalf/2) - int32(windowHeight/g.zoom/2),
+		X: (meX + meHalf/2) - int32(float32(windowWidth)/g.zoom/2),
+		Y: (meY + meHalf/2) - int32(float32(windowHeight)/g.zoom/2),
 	}
 
 	g.renderer.SetDrawColor(230, 230, 230, sdl.ALPHA_OPAQUE)
@@ -298,7 +300,7 @@ func (g *game) Redraw(cells []*agario.Cell) {
 
 	statusY := int32(0)
 	for _, msg := range g.ai.Status {
-		_, h := g.renderText(msg, f, sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}, sdl.Point{int32(windowWidth / g.zoom / 2), statusY}, true)
+		_, h := g.renderText(msg, f, sdl.Color{0, 0, 0, sdl.ALPHA_OPAQUE}, sdl.Point{int32(float32(windowWidth) / g.zoom / 2), statusY}, true)
 		statusY += h + 3
 	}
 
@@ -364,9 +366,9 @@ func (g *game) getSortedCells() []*agario.Cell {
 	return cells
 }
 
-func calculateZoom(totalSize int32) float32 {
+func calculateZoom(totalSize int32, windowWidth, windowHeight int) float32 {
 	f := math.Pow(math.Min(64.0/float64(totalSize), 1.0), 1.0/2.5)
-	d := f * math.Max(windowHeight/1080.0, windowWidth/1920.0)
+	d := f * math.Max(float64(windowHeight)/1080.0, float64(windowWidth)/1920.0)
 
 	return float32(d)
 }
