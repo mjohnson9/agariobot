@@ -5,14 +5,11 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"runtime"
 	"runtime/pprof"
-	"strings"
 	"time"
 
+	"github.com/ajhager/engi"
 	"github.com/nightexcessive/agario"
-	"github.com/veandco/go-sdl2/sdl"
-	"github.com/veandco/go-sdl2/sdl_ttf"
 )
 
 const (
@@ -20,83 +17,63 @@ const (
 	frameTime       = time.Second / framesPerSecond
 )
 
-func handleSDLEvents(c chan sdl.Event, quitChan chan struct{}) {
-	/*sdl.AddEventWatchFunc(func(ev sdl.Event) bool {
-		c <- ev
-		return true
-	})*/
+func handleGameEvents(c chan struct{}, g *agario.Game) {
 	for {
-		select {
-		case _, ok := <-quitChan:
-			if !ok {
-				return
-			}
-		default:
+		g.RunOnce(false)
+		for g.RunOnce(true) {
 		}
-		ev := sdl.WaitEventTimeout(250)
-		if ev == nil {
-			continue
-		}
-		c <- ev
-	}
-}
-
-func handleGameEvents(c chan chan struct{}, g *game) {
-	respChan := make(chan struct{})
-	for {
-		g.Game.RunOnce(false)
-		for g.Game.RunOnce(true) {
-		}
-		c <- respChan
-		<-respChan // Wait for the render to finish so that we don't have to use mutexes
+		c <- struct{}{}
 	}
 }
 
 func run(ig *agario.Game) {
-	g := createGame(ig)
-
-	sdlEvents := make(chan sdl.Event, 16)
-	gameEvents := make(chan chan struct{})
+	gameEvents := make(chan struct{})
 	quitChan := make(chan struct{})
 
-	go handleGameEvents(gameEvents, g)
+	g := &Game{
+		g:        ig,
+		quitChan: quitChan,
+	}
+	/*ai := &AI{
+		g: ig,
+	}*/
+	ka := &keepAlive{
+		g: ig,
+	}
 
-	go func() {
-		var lastTick uint32
-		for {
-			select {
-			case event := <-sdlEvents:
-				switch event.(type) {
-				case *sdl.QuitEvent:
-					log.Printf("SDL requested exit. Stopping input loop...")
-					close(quitChan)
-					return
-				case *sdl.MouseMotionEvent:
-				default:
-					log.Printf("SDL event: %T", event)
-				}
-			case respChan := <-gameEvents:
-				dt := sdl.GetTicks() - lastTick
-				shouldRun := g.Tick(time.Duration(dt) * time.Millisecond)
-				lastTick = sdl.GetTicks()
-				if !shouldRun {
-					os.Exit(0)
-				}
-				respChan <- struct{}{}
+	go handleGameEvents(gameEvents, ig)
+	go engi.Open("agariobot", 1280, 800, false, g)
+
+	lastTick := time.Now()
+
+mainLoop:
+	for {
+		select {
+		case _, ok := <-quitChan:
+			if !ok {
+				break mainLoop
 			}
-		}
-	}()
+		case <-gameEvents:
+			dt := time.Now().Sub(lastTick)
 
-	handleSDLEvents(sdlEvents, quitChan)
-	log.Printf("Input loop stopped gracefully")
+			ig.Lock()
+
+			ka.Update(dt)
+			//ai.Update(dt)
+
+			ig.Unlock()
+
+			lastTick = time.Now()
+		}
+	}
+
+	log.Printf("Gracefully stopped")
 }
 
-var randomNames = []string{"derp", "derp", "derp", "derp", "derp", "earth", "cia", "confederate", "sanik", "moon", "qing dynasty", "matriarchy", "patriarchy", "feminism", "steam", "bait", "vinesauce", "sir", "wojak", "doge", "nasa", "mars", "pokerface", "8", "irs", "receita federal"}
-
-//var randomNames = []string{"Derp", "DerpBot"}
+var randomNames = []string{"Derp", "Derp", "Derp", "Derp", "Derp", "Earth", "CIA", "Confederate", "Sanik", "Moon", "Qing Dynasty", "Matriarchy", "Patriarchy", "Feminism", "Steam", "Bait", "Vinesauce", "Sir", "Wojak", "Doge", "NASA", "Mars", "Pokerface", "8", "IRS"}
 
 func randomName() string {
-	return strings.Title(randomNames[rand.Intn(len(randomNames))])
+	return randomNames[rand.Intn(len(randomNames))]
 }
 
 var (
@@ -108,7 +85,7 @@ var (
 )
 
 func main() {
-	log.SetFlags(log.Lmicroseconds | log.Lshortfile)
+	log.SetFlags(log.Lshortfile)
 
 	rand.Seed(time.Now().UnixNano())
 
@@ -186,17 +163,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	defer c.Close()
+	//defer c.Close()
 
 	g := agario.NewGame(c)
-	defer g.Close()
-
-	log.Printf("Initializing SDL...")
-
-	runtime.LockOSThread() // Lock this to the OS thread. We'll use this thread for rendering and event handling.
-	sdl.Init(sdl.INIT_EVERYTHING)
-
-	ttf.Init()
+	//defer g.Close()
 
 	run(g)
 

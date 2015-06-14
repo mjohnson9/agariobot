@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"time"
 
@@ -26,7 +25,7 @@ const (
 )
 
 type AI struct {
-	g *game
+	g *agario.Game
 
 	Me              *agario.Cell
 	SmallestOwnCell *agario.Cell
@@ -50,13 +49,21 @@ type AI struct {
 const foodMaxSize = 20
 
 func (ai *AI) Update(dt time.Duration) {
+	if ai.g.MyIDs == nil || len(ai.g.MyIDs) == 0 {
+		return
+	}
+
+	ai.updateOwnCells()
+
+	if len(ai.OwnCells) == 0 {
+		return
+	}
+
 	if ai.timeToNextSplit > 0 {
 		ai.timeToNextSplit -= dt
 	}
 
 	ai.Status = ai.Status[0:0]
-
-	ai.updateOwnCells()
 
 	ai.Me = ai.getPseudoMe()
 	ai.SmallestOwnCell = ai.getSmallestOwnCell()
@@ -70,12 +77,12 @@ func (ai *AI) Update(dt time.Duration) {
 	preySize := int32(float32(ai.SmallestOwnCell.Size) / eatSizeRequirement)
 	ignoreSize := ai.SmallestOwnCell.Size / 4
 
-	for _, cell := range ai.g.Game.Cells {
+	for _, cell := range ai.g.Cells {
 		if cell.IsVirus {
 			continue
 		}
 
-		if _, myCell := ai.g.Game.MyIDs[cell.ID]; myCell {
+		if _, myCell := ai.g.MyIDs[cell.ID]; myCell {
 			continue
 		}
 
@@ -88,10 +95,6 @@ func (ai *AI) Update(dt time.Duration) {
 			ai.Predators = append(ai.Predators, cell)
 		}
 	}
-
-	sort.Sort(sort.Reverse(cellArray(ai.Food)))
-	sort.Sort(sort.Reverse(cellArray(ai.Prey)))
-	sort.Sort(sort.Reverse(cellArray(ai.Predators)))
 
 	ai.buildCostMap()
 	ai.DijkstraMap = search.DijkstraFrom(ai.Map.GetNode(gameToCostMap(ai.Me.Position.Elem())), UndirectedMap(ai.Map), nil)
@@ -139,7 +142,7 @@ func (ai *AI) Execute() {
 	}
 
 	ai.addStatusMessage("Wandering")
-	mapCenter := mgl32.Vec2{float32(ai.g.Game.Board.Bottom) / 2, float32(ai.g.Game.Board.Right) / 2}
+	mapCenter := mgl32.Vec2{float32(ai.g.Board.Bottom) / 2, float32(ai.g.Board.Right) / 2}
 	ai.movePathed(mapCenter)
 	ai.State = stateIdle
 }
@@ -213,9 +216,9 @@ func (ai *AI) hunt() bool {
 
 	ai.addStatusMessage("Splitting on " + prettyCellName(closestPrey))
 	ai.Path = []mgl32.Vec2{ai.Me.Position, closestPrey.Position}
-	ai.g.Game.SetTargetPos(closestPrey.Position.X(), closestPrey.Position.Y())
+	ai.g.SetTargetPos(closestPrey.Position.X(), closestPrey.Position.Y())
 	if ai.timeToNextSplit <= 0 {
-		ai.g.Game.Split()
+		ai.g.Split()
 		ai.timeToNextSplit = 250 * time.Millisecond
 	}
 
@@ -265,7 +268,7 @@ const (
 )
 
 func (ai *AI) buildCostMap() {
-	w, h := int(ai.g.Game.Board.Right/costMapReduction), int(ai.g.Game.Board.Bottom/costMapReduction)
+	w, h := int(ai.g.Board.Right/costMapReduction), int(ai.g.Board.Bottom/costMapReduction)
 	ai.Map = NewMap(w+1, h+1)
 
 	for x := 0; x < w; x++ {
@@ -534,9 +537,9 @@ func (ai *AI) getOurTotalSize() (s int32) {
 }
 
 func (ai *AI) updateOwnCells() {
-	ai.OwnCells = make([]*agario.Cell, 0, len(ai.g.Game.MyIDs))
-	for id := range ai.g.Game.MyIDs {
-		cell, found := ai.g.Game.Cells[id]
+	ai.OwnCells = make([]*agario.Cell, 0, len(ai.g.MyIDs))
+	for id := range ai.g.MyIDs {
+		cell, found := ai.g.Cells[id]
 		if !found {
 			continue
 		}
@@ -559,7 +562,7 @@ func (ai *AI) addStatusMessage(str string) {
 		ai.addStatusMessage("Failed to find path. Moving directly to objective.")
 
 		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
-		ai.g.Game.SetTargetPos(position.X(), position.Y())
+		ai.g.SetTargetPos(position.X(), position.Y())
 		return
 	}
 	ai.addStatusMessage(fmt.Sprintf("A* (undirected): path cost: %.2f / nodes expanded: %d", cost, nodes))
@@ -574,7 +577,7 @@ func (ai *AI) movePathed(position mgl32.Vec2) {
 		ai.addStatusMessage("Objective is within minimum distance. Moving directly to objective.")
 
 		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
-		ai.g.Game.SetTargetPos(position.X(), position.Y())
+		ai.g.SetTargetPos(position.X(), position.Y())
 		return
 	}
 
@@ -596,7 +599,7 @@ func (ai *AI) movePathed(position mgl32.Vec2) {
 		ai.addStatusMessage("movePathed: Failed to find path. Moving directly to objective.")
 
 		ai.Path = []mgl32.Vec2{ai.Me.Position, position}
-		ai.g.Game.SetTargetPos(position.X(), position.Y())
+		ai.g.SetTargetPos(position.X(), position.Y())
 		return
 	}
 
@@ -625,12 +628,12 @@ func (ai *AI) moveAlongPath(targetPosition mgl32.Vec2, path []graph.Node) {
 		ai.addStatusMessage("Failed to find path node that was far enough away. Moving directly to objective.")
 
 		ai.Path = []mgl32.Vec2{ai.Me.Position, targetPosition}
-		ai.g.Game.SetTargetPos(targetPosition.X(), targetPosition.Y())
+		ai.g.SetTargetPos(targetPosition.X(), targetPosition.Y())
 		return
 	}
 
 	ai.Path = pathVecs
-	ai.g.Game.SetTargetPos(float32(pathNode.X*costMapReduction), float32(pathNode.Y*costMapReduction))
+	ai.g.SetTargetPos(float32(pathNode.X*costMapReduction), float32(pathNode.Y*costMapReduction))
 }
 
 func dist2(a, b mgl32.Vec2) float32 {
